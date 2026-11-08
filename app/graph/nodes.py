@@ -58,12 +58,6 @@ def make_math_agent_node(llm: LLMProvider):
         expression = _extract_expression(user_msg)
         if expression:
             tool_output = calculator.invoke({"expression": expression})
-            if tool_output.startswith("Could not evaluate"):
-                tool_output = (
-                    f"This looked like it might contain a calculation, but I couldn't parse a valid "
-                    f"arithmetic expression from it (tried: '{expression}'). Try phrasing it as a plain "
-                    f"expression, e.g. '12 * (3 + 4) / 2'."
-                )
         else:
             tool_output = "No arithmetic expression was found in the request."
         answer = llm.respond(user_msg, tool_output=tool_output)
@@ -92,12 +86,10 @@ def make_general_agent_node(llm: LLMProvider):
 
 
 def human_escalation_node(state: AgentState) -> dict:
-    """
-    Pauses the graph via LangGraph's interrupt() and waits for a human to
-    call POST /escalations/{id}/respond. LangGraph re-runs a node from the
-    top on resume, so everything before interrupt() here must stay
-    idempotent - which is why this node does nothing but read state and
-    interrupt: no writes happen until after the human's response comes back.
+    """Pause the graph until POST /escalations/{id}/respond resumes it.
+
+    On resume LangGraph re-runs this node from the top, so the code before
+    interrupt() must have no side effects. It only reads state.
     """
     question = state.get("escalation_question") or "This request needs human approval. Approve, reject, or advise?"
     response = interrupt({"question": question, "route": state.get("route")})
