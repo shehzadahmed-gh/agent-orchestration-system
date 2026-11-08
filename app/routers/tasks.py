@@ -23,12 +23,8 @@ def create_task(request: TaskCreateRequest) -> TaskResponse:
         db.refresh(task)
         response = TaskResponse.model_validate(task)
 
-    # The DB session above is fully closed (connection returned to the pool)
-    # before we trigger task execution. This matters because in eager mode
-    # (CELERY_TASK_ALWAYS_EAGER=true, used by tests/CI) .delay() runs the
-    # entire graph synchronously right here, in this same request - it
-    # should never do so while this endpoint is also holding its own
-    # session/transaction open.
+    # Close the session before .delay(): in eager mode the whole graph runs
+    # inline here, and it hung when this request still held a connection.
     run_agent_graph.delay(task_id)
 
     if get_settings().celery_task_always_eager:
