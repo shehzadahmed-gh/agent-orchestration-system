@@ -9,6 +9,7 @@ Usage:
     celery -A app.celery_app worker --loglevel=info &   # only if not eager
     python scripts/smoke_test.py --base-url http://localhost:8010
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,6 +53,15 @@ def main() -> int:
     if task["status"] != "completed" or "42" not in (task["result"] or ""):
         print("  !! expected completed task with 42 in the result")
         failures += 1
+
+    print("\n== TEST: calculator limits (must fail fast, not hang the worker) ==")
+    for expression in ("What is 2^9^9^9?", "What is 5/0?"):
+        r = client.post("/tasks", json={"input": expression})
+        task = wait_for_task(client, r.json()["id"])
+        print(" ", task["status"], task["result"])
+        if task["status"] != "completed" or "Could not evaluate" not in (task["result"] or ""):
+            print(f"  !! expected a completed task with an error message for {expression!r}")
+            failures += 1
 
     print("\n== TEST: research route ==")
     r = client.post("/tasks", json={"input": "What is the significance of the Rosetta Stone?"})
