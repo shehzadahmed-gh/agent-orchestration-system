@@ -60,3 +60,21 @@ def test_respond_default_message_when_nothing_available():
     p = _provider()
     result = p.respond("hello there")
     assert "hello there" in result
+
+
+def test_escalation_keywords_match_word_starts_only():
+    p = _provider()
+    assert p.classify_route("My payments failed twice.", []) == "escalate"
+    assert p.classify_route("I deleted the wrong folder, can you help?", []) == "escalate"
+    assert p.classify_route("Can you undelete my file?", []) != "escalate"
+
+
+def test_multi_word_keyword_allows_any_spacing():
+    p = _provider()
+    assert p.classify_route("Please CANCEL   subscription now", []) == "escalate"
+
+
+def test_escalation_keywords_come_from_settings():
+    p = LocalRuleBasedProvider(escalation_keywords="transfer funds, close account")
+    assert p.classify_route("Please close account 123", []) == "escalate"
+    assert p.classify_route("Please delete my account", []) != "escalate"

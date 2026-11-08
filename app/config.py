@@ -1,18 +1,18 @@
-"""
-Central configuration for the agent orchestration service.
+"""Service configuration, read from environment variables or a .env file.
 
-As in the RAG project, every backend is chosen via environment variables so
-the same code runs fully offline (SQLite checkpointer, in-process Celery
-execution, a deterministic local "LLM") for local dev/tests, or against real
-infrastructure (Postgres, Redis + a real Celery worker, GPT-4o/Claude
-Sonnet) via docker-compose in production. See .env.example.
+The defaults run everything locally (rule-based provider, local Chroma,
+in-process Celery if CELERY_TASK_ALWAYS_EAGER=true). docker-compose.yml sets
+the values for the full stack. See .env.example for every option.
 """
+
 from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.llm_provider import DEFAULT_ESCALATION_KEYWORDS
 
 
 class Settings(BaseSettings):
@@ -37,13 +37,11 @@ class Settings(BaseSettings):
 
     # --- background execution (Redis + Celery) ---
     redis_url: str = "redis://localhost:6379/0"
-    # When true, tasks run synchronously in-process instead of via a Celery
-    # worker + Redis broker - used by tests/CI so the graph logic is
-    # exercisable without standing up infrastructure. docker-compose sets
-    # this to false so real async execution is used in "production".
+    # true: .delay() runs the task inline, so no broker or worker is needed
+    # (local runs and tests). docker-compose sets false and runs a worker.
     celery_task_always_eager: bool = False
 
-    # --- embeddings for semantic memory (same offline-by-default pattern as the RAG project) ---
+    # --- embeddings for semantic memory ---
     embedding_backend: Literal["local", "openai"] = "local"
     embedding_dimension: int = 384
     openai_embedding_model: str = "text-embedding-3-small"
@@ -58,11 +56,11 @@ class Settings(BaseSettings):
     anthropic_chat_model: str = "claude-sonnet-5"
     anthropic_api_key: str | None = None
 
-    # --- tool integration with the rag-hybrid-search project (optional) ---
+    # --- knowledge_base_search tool: base URL of a running rag-hybrid-search service ---
     rag_service_url: str | None = None
 
-    # --- human-in-the-loop ---
-    escalation_keywords: str = "delete,wire transfer,payment,refund,cancel subscription,irreversible"
+    # --- human-in-the-loop (comma-separated, used by the local rule-based provider) ---
+    escalation_keywords: str = DEFAULT_ESCALATION_KEYWORDS
 
 
 @lru_cache

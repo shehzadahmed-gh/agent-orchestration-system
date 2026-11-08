@@ -1,22 +1,18 @@
-"""
-Pluggable reasoning backend for the graph's nodes - the same
-offline-default-plus-real-API pattern used throughout both portfolio
-projects. Every node calls one of three methods on this interface:
+"""Reasoning backends for the graph's nodes.
 
-  * classify_route(...)          - used by the supervisor node
-  * respond(...)                 - used by every agent node to produce output
-  * generate(...)                - the raw primitive real providers implement
-
-`LocalRuleBasedProvider` implements routing/responses with keyword
-heuristics and direct tool-output formatting, so the entire graph (routing,
-tool use, memory, escalation, resume) is exercisable with zero API keys.
-Set LLM_PROVIDER=openai|anthropic for real model-driven reasoning - nothing
-else in app/graph changes.
+Every node calls one of two methods: `classify_route` (used by the supervisor)
+or `respond` (used by the agents). The OpenAI and Anthropic providers build a
+prompt and call the model through `generate`. `LocalRuleBasedProvider` uses
+keyword rules instead, so the whole graph can run and be tested without an
+API key. Select one with LLM_PROVIDER.
 """
+
 from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+
+DEFAULT_ESCALATION_KEYWORDS = "delete,wire transfer,payment,refund,cancel subscription,irreversible"
 
 
 class LLMProvider(ABC):
@@ -27,7 +23,6 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
     def classify_route(self, user_message: str, memory_context: list[str]) -> str:
-        """Default path for real providers: ask the model to classify."""
         system = (
             "Classify the user's request into exactly one label: math, research, general, or escalate. "
             "Use 'escalate' only if the request involves a sensitive or irreversible real-world action "
@@ -43,24 +38,23 @@ class LLMProvider(ABC):
         return "general"
 
     def respond(self, question: str, context: list[str] | None = None, tool_output: str | None = None) -> str:
-        """Default path for real providers: build a prompt from whatever
-        context/tool output is available and ask the model to answer."""
         parts = [f"Question: {question}"]
         if context:
             parts.append("Relevant memory:\n" + "\n".join(f"- {c}" for c in context))
         if tool_output:
             parts.append(f"Tool result:\n{tool_output}")
         return self.generate(
-            system="You are a helpful assistant. Answer clearly and concisely, using any tool result and memory context provided.",
+            system=(
+                "You are a helpful assistant. Answer clearly and concisely, "
+                "using any tool result and memory context provided."
+            ),
             user="\n\n".join(parts),
             max_tokens=300,
         )
 
 
 class OpenAIProvider(LLMProvider):
-    """GPT-4o via the OpenAI Chat Completions API."""
-
-    name = "openai-gpt-4o"
+    name = "openai"
 
     def __init__(self, api_key: str, model: str = "gpt-4o"):
         from openai import OpenAI
@@ -78,11 +72,9 @@ class OpenAIProvider(LLMProvider):
 
 
 class AnthropicProvider(LLMProvider):
-    """Claude Sonnet via the Anthropic Messages API."""
+    name = "anthropic"
 
-    name = "anthropic-claude-sonnet"
-
-    def __init__(self, api_key: str, model: str = "claude-sonnet-5"):
+    def __init__(self, api_key: str, model: str):
         import anthropic
 
         self._client = anthropic.Anthropic(api_key=api_key)
@@ -98,30 +90,38 @@ class AnthropicProvider(LLMProvider):
         return "".join(block.text for block in response.content if block.type == "text")
 
 
+def _keyword_pattern(keywords: str) -> re.Pattern[str]:
+    """Match any keyword at the start of a word, so "delete" matches "deleted"
+    and "deletes" but not "undelete". Multi-word keywords allow any whitespace."""
+    parts = [k.strip() for k in keywords.split(",") if k.strip()]
+    alternatives = [r"\s+".join(re.escape(word) for word in part.split()) for part in parts]
+    return re.compile(r"\b(?:" + "|".join(alternatives) + ")", re.IGNORECASE)
+
+
 class LocalRuleBasedProvider(LLMProvider):
-    """
-    Deterministic, dependency-free stand-in. Routing uses keyword/regex
-    heuristics instead of model reasoning, and responses are built directly
-    from tool output / memory rather than generated - real, working logic
-    for exercising the whole graph offline, just without genuine language
-    understanding. Swap LLM_PROVIDER to unlock real reasoning.
+    """Keyword and regex routing with tool output passed straight through.
+
+    This exercises the graph's control flow without an API key. It has no
+    language understanding: "What does delete do in SQL?" is escalated because
+    it contains "delete".
     """
 
-    name = "local-rule-based-stub"
+    name = "local-rules"
 
-    _ESCALATION_TRIGGERS = ("delete", "wire transfer", "payment", "refund", "cancel subscription", "irreversible")
-    # Requires a digit on BOTH sides of the operator, so "90-minute" or
-    # "step-3" don't false-positive into the math route the way a looser
-    # "digit followed by hyphen" pattern would.
+    # A digit on both sides of the operator, so "90-minute" or "step-3" don't
+    # route to the math agent.
     _MATH_PATTERN = re.compile(r"\d\s*[-+*/^]\s*\d|\bcalculate\b|\bcompute\b")
     _RESEARCH_TRIGGERS = ("who", "what", "when", "where", "why", "how", "find", "search", "look up", "explain")
 
+    def __init__(self, escalation_keywords: str = DEFAULT_ESCALATION_KEYWORDS):
+        self._escalation_pattern = _keyword_pattern(escalation_keywords)
+
     def generate(self, *, system: str, user: str, max_tokens: int = 512) -> str:
-        return "[local-rule-based-stub] set LLM_PROVIDER=openai or anthropic for real generated text."
+        return "[local-rules] set LLM_PROVIDER=openai or anthropic for generated text."
 
     def classify_route(self, user_message: str, memory_context: list[str]) -> str:
         lowered = user_message.lower()
-        if any(trigger in lowered for trigger in self._ESCALATION_TRIGGERS):
+        if self._escalation_pattern.search(lowered):
             return "escalate"
         if self._MATH_PATTERN.search(lowered):
             return "math"
@@ -134,18 +134,17 @@ class LocalRuleBasedProvider(LLMProvider):
             return tool_output
         if context:
             return "Based on a similar past interaction: " + _clean_memory_snippet(context[0])
-        return f"Noted: {question!r}. (Set LLM_PROVIDER=openai or anthropic for a real generated response.)"
+        return f"Noted: {question!r}. (Set LLM_PROVIDER=openai or anthropic for a generated response.)"
 
 
 def _clean_memory_snippet(text: str, max_len: int = 150) -> str:
-    """Memory entries are stored as 'Q: ...\\nA: ...'; surface just the
-    answer half, truncated, so echoing memory in the local stub can't
-    compound into ever-longer nested text across repeated turns."""
+    """Memory entries are stored as 'Q: ...\\nA: ...'. Return the answer half,
+    truncated, so repeated turns don't keep nesting earlier answers."""
     if "\nA: " in text:
         text = text.split("\nA: ", 1)[1]
     text = text.replace("\n", " ").strip()
     if len(text) > max_len:
-        text = text[: max_len - 1].rstrip() + "\u2026"
+        text = text[: max_len - 1].rstrip() + "…"
     return text
 
 
@@ -158,4 +157,4 @@ def build_llm_provider(settings) -> LLMProvider:
         if not settings.anthropic_api_key:
             raise RuntimeError("LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY to be set.")
         return AnthropicProvider(api_key=settings.anthropic_api_key, model=settings.anthropic_chat_model)
-    return LocalRuleBasedProvider()
+    return LocalRuleBasedProvider(escalation_keywords=settings.escalation_keywords)
