@@ -1,17 +1,13 @@
+"""Task and escalation records in PostgreSQL. These need exact status
+queries and transactions, so they live here rather than in Chroma, which only
+holds the fuzzy-recall memory (app/memory/semantic_memory.py).
 """
-Structured state, in PostgreSQL - the counterpart to the semantic memory
-layer in app/memory/semantic_memory.py (ChromaDB). Tasks and escalations are
-exact, queryable, transactional records (status, timestamps, foreign keys);
-semantic memory is fuzzy, similarity-searched recall. Splitting them onto
-two different stores means each is used for what it's actually good at,
-rather than bolting vector search onto Postgres or trying to do exact
-status tracking in Chroma.
-"""
+
 from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -24,10 +20,10 @@ def _uuid() -> str:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-class TaskStatus(str, enum.Enum):
+class TaskStatus(enum.StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     AWAITING_HUMAN = "awaiting_human"
@@ -35,7 +31,7 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
 
 
-class EscalationStatus(str, enum.Enum):
+class EscalationStatus(enum.StrEnum):
     PENDING = "pending"
     RESOLVED = "resolved"
 
@@ -52,7 +48,7 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
-    escalations: Mapped[list["Escalation"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    escalations: Mapped[list[Escalation]] = relationship(back_populates="task", cascade="all, delete-orphan")
 
 
 class Escalation(Base):
@@ -66,4 +62,4 @@ class Escalation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    task: Mapped["Task"] = relationship(back_populates="escalations")
+    task: Mapped[Task] = relationship(back_populates="escalations")

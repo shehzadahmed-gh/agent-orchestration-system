@@ -1,11 +1,10 @@
+"""Celery tasks that run (or resume) the agent graph.
+
+POST /tasks only creates the row and enqueues `run_agent_graph`, so the request
+returns straight away. A worker runs the graph and writes the outcome back to
+the tasks and escalations tables, which the API reads.
 """
-The Celery task is where the graph actually executes - decoupled from the
-FastAPI request/response cycle, as called for by "distributed background
-workloads through Redis and Celery, separating asynchronous processing from
-interactive execution". `POST /tasks` returns as soon as this task is
-*enqueued*; the graph runs here, in a worker process, and writes its outcome
-back to the `tasks` / `escalations` tables that the API reads from.
-"""
+
 from __future__ import annotations
 
 from celery.utils.log import get_task_logger
@@ -67,7 +66,10 @@ def _run_or_resume(task_id: str, resume_value: str | None) -> None:
         with get_checkpointer_ctx(settings) as checkpointer:
             compiled = build_graph(llm, memory).compile(checkpointer=checkpointer)
             config = {"configurable": {"thread_id": task_id}}
-            graph_input = Command(resume=resume_value) if resume_value is not None else _initial_state(task_id, task.input_text)
+            if resume_value is not None:
+                graph_input = Command(resume=resume_value)
+            else:
+                graph_input = _initial_state(task_id, task.input_text)
             result = compiled.invoke(graph_input, config)
 
         interrupts = result.get("__interrupt__")

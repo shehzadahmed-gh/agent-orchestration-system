@@ -1,5 +1,4 @@
-"""
-The graph:
+"""Graph wiring.
 
                                   +--> math_agent -----+
     retrieve_memory -> supervisor +--> research_agent -+--> finalize -> END
@@ -10,14 +9,10 @@ The graph:
                                      approved -> general_agent
                                      otherwise -> finalize
 
-A supervisor node classifies each request into one of four routes -
-matching "tool use, persistent memory, agent coordination, and
-human-in-the-loop escalation":
-  * tool use            - math_agent (calculator) / research_agent (knowledge_base_search)
-  * persistent memory   - retrieve_memory reads Chroma before routing; finalize writes to it after
-  * agent coordination  - the supervisor's routing itself, a standard LangGraph supervisor pattern
-  * HITL escalation      - human_escalation's interrupt()/Command(resume=...) pause-and-resume
+retrieve_memory reads similar past interactions from Chroma before routing,
+and finalize writes the new one back after the answer is produced.
 """
+
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph

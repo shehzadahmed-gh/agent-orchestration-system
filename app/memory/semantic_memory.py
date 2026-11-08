@@ -1,15 +1,11 @@
-"""
-Semantic memory - the ChromaDB half of the "two persistence layers" split
-(see app/db/models.py for the PostgreSQL/structured half).
+"""Long-term memory across tasks, stored in ChromaDB.
 
-This is long-term, cross-session recall: every finalized interaction is
-embedded and stored here, and future runs retrieve the most similar past
-entries as context before the supervisor routes the request. It is
-deliberately separate from the LangGraph checkpointer (which persists a
-single thread's exact working state for pause/resume) - this store is
-about recalling relevant *past* interactions, potentially from entirely
-different threads/tasks.
+Every finished interaction is embedded and stored. Before routing a new
+request, the most similar past entries are fetched as context. This is
+separate from the LangGraph checkpointer, which only stores the state of one
+paused run so it can be resumed.
 """
+
 from __future__ import annotations
 
 import time
@@ -36,8 +32,8 @@ class SemanticMemory:
         else:
             self._client = chromadb.PersistentClient(path=local_path or "./data/chroma_local")
 
-        # We supply our own embeddings explicitly, so no implicit embedding
-        # function (and therefore no implicit model download) is ever needed.
+        # Embeddings are always passed in, so Chroma never needs to download
+        # its default embedding model.
         self._collection = self._client.get_or_create_collection(collection_name)
         self._embedder = embedder
         self._default_top_k = top_k
@@ -54,21 +50,15 @@ class SemanticMemory:
         return entry_id
 
     def search(self, query: str, top_k: int | None = None, min_similarity: float = 0.3) -> list[str]:
-        """
-        Returns the most similar past entries, best-first - but only ones
-        that actually clear `min_similarity`. Chroma's `.query()` always
-        returns its top-N *nearest* neighbours regardless of whether any of
-        them are meaningfully close, so without this gate a query on a
-        totally unrelated topic would still silently return "the least
-        dissimilar" memories instead of nothing.
+        """Most similar past entries, best first, that reach `min_similarity`.
 
-        The embedder L2-normalizes every vector, so Chroma's default
-        (squared-L2) distance recovers true cosine similarity via
-        `1 - distance / 2`: 1.0 for identical, 0.0 for orthogonal/unrelated,
-        negative for opposed. `min_similarity=0.3` is tuned for the offline
-        hashing embedder, which has no learned semantics - recalibrate
-        (likely upward, since real embeddings separate topics more cleanly)
-        when EMBEDDING_BACKEND=openai.
+        Chroma always returns the top-k nearest entries, even when none of
+        them are related, so results below the threshold are dropped.
+
+        Vectors are L2-normalised, so Chroma's squared-L2 distance d converts
+        to cosine similarity as 1 - d / 2. The 0.3 threshold was picked by
+        trial against the hashing embedder and would need re-tuning for
+        OpenAI embeddings.
         """
         if not query:
             return []
@@ -84,7 +74,7 @@ class SemanticMemory:
         documents = (results.get("documents") or [[]])[0]
         distances = (results.get("distances") or [[]])[0]
         matches = []
-        for doc, distance in zip(documents, distances):
+        for doc, distance in zip(documents, distances, strict=True):
             cosine_similarity = 1.0 - (distance / 2.0)
             if cosine_similarity >= min_similarity:
                 matches.append(doc)

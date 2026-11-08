@@ -1,10 +1,11 @@
+"""Embedding providers for semantic memory.
+
+LocalHashingEmbeddingProvider needs no model download or API key, but it is a
+hashed bag of words with no learned meaning. Set EMBEDDING_BACKEND=openai for
+real embeddings. This is a small copy of the same module in rag-hybrid-search,
+kept here so the two services don't depend on each other.
 """
-Same offline-by-default embedding pattern used in the rag-hybrid-search
-project: a dependency-light local provider so semantic memory works with no
-API key, and a real OpenAI-backed provider as the production swap-in. Kept
-as a small local copy (rather than importing the sibling project) so this
-service has no cross-repo dependency.
-"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

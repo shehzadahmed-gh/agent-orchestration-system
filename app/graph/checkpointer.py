@@ -1,10 +1,8 @@
+"""Picks the LangGraph checkpointer. Each graph run opens its own connection
+(one Celery task = one invoke), so there is no pool to share between worker
+processes.
 """
-Selects the LangGraph checkpointer backend. Both PostgresSaver and
-SqliteSaver are used as context managers, opening a fresh connection per
-graph invocation - simple and safe for this service's execution model (one
-Celery task = one graph.invoke() call), avoiding the need to manage a
-long-lived connection pool across worker processes.
-"""
+
 from __future__ import annotations
 
 import os
