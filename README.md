@@ -1,80 +1,85 @@
 # Agent Orchestration System
 
-A multi-agent system built with LangGraph, orchestrating four capabilities — tool use, persistent memory, agent coordination, and human-in-the-loop escalation — with PostgreSQL for structured state, ChromaDB for semantic memory, and Redis/Celery for distributed background execution.
+[![CI](https://github.com/shehzadahmed-gh/agent-orchestration-system/actions/workflows/ci.yml/badge.svg)](https://github.com/shehzadahmed-gh/agent-orchestration-system/actions/workflows/ci.yml)
+
+A multi-agent service built with LangGraph. A supervisor routes each request to a math agent (calculator tool), a research agent (knowledge-base search), a general agent, or a human reviewer. Requests that need approval pause mid-graph and resume when someone responds through the API, possibly in a different worker process. Task state lives in PostgreSQL, long-term memory in ChromaDB, and graph runs happen in Celery workers fed through Redis.
 
 ```
-                                  +--> math_agent (calculator tool) -----+
-POST /tasks -> retrieve_memory -> supervisor +--> research_agent (KB search tool) -+--> finalize -> done
-   (Celery task,                  +--> general_agent --------------------+     ^
+                                  +--> math_agent (calculator) ---------+
+POST /tasks -> retrieve_memory -> supervisor +--> research_agent (KB search) -------+--> finalize -> done
+   (Celery task,                  +--> general_agent -------------------+     ^
    Postgres checkpoint)           +--> human_escalation (interrupt) ------------+
                                             |  graph pauses; Postgres holds the checkpoint
                                             v
-                            POST /escalations/{id}/respond -> Command(resume=...) -> resumes exactly where it paused
+                            POST /escalations/{id}/respond -> Command(resume=...) -> continues from the pause
 ```
 
-## Why it's built this way
+## How the pieces fit
 
-Same philosophy as the sibling `rag-hybrid-search` project: every backend sits behind an interface with an **offline default** (no API key, no external services beyond a database) and a **real production implementation**.
-
-| Capability | How it's implemented |
+| Part | Implementation |
 |---|---|
-| Tool use | A safe AST-based calculator (no `eval`) and a knowledge-base search tool that calls the `rag-hybrid-search` project's `/retrieval/search` over HTTP — the two portfolio projects compose |
-| Persistent memory | **Two separate stores**, each used for what it's good at: PostgreSQL for exact, queryable `tasks`/`escalations` records; ChromaDB for fuzzy similarity-search recall of past interactions, gated by a relevance threshold so unrelated memories don't leak in |
-| Agent coordination | A supervisor node classifies each request and routes to a specialist agent — a standard LangGraph supervisor pattern |
-| Human-in-the-loop | `interrupt()` pauses the graph mid-run (state persisted via the Postgres checkpointer); `POST /escalations/{id}/respond` resumes it with `Command(resume=...)` from the exact checkpoint, potentially in a completely different process |
-| Background execution | `POST /tasks` enqueues a Celery task and returns immediately (202); a separate worker process (Redis broker/backend) actually runs the graph, decoupling interactive request handling from agent execution time |
-| Reasoning backend | `LocalRuleBasedProvider` (default): keyword-heuristic routing + direct tool-output formatting, no API key needed. `LLM_PROVIDER=openai`/`anthropic` swaps in GPT-4o / Claude Sonnet for real reasoning — nothing else in `app/graph` changes |
-
-This means the entire graph — routing, tool use, memory read/write, and **both** escalation outcomes (approve/reject) — is fully exercisable with zero API keys, and was verified two ways during development: in-process (`CELERY_TASK_ALWAYS_EAGER=true`) and against a genuinely separate Celery worker process consuming from a real Redis broker.
+| Routing | A supervisor node picks one of four routes. With an LLM provider the model classifies the request; the default local provider uses keyword and regex rules. |
+| Tools | An AST-based calculator (no `eval`, with size limits, see below) and `knowledge_base_search`, which calls `/retrieval/search` on my [rag-hybrid-search](https://github.com/shehzadahmed-gh/rag-hybrid-search) service when `RAG_SERVICE_URL` is set. |
+| Human review | `interrupt()` pauses the graph and the Postgres checkpointer stores its state. `POST /escalations/{id}/respond` resumes it with `Command(resume=...)`. Replying "approve" hands the request to the general agent; anything else ends it with the reviewer's reply. |
+| Task records | PostgreSQL tables for tasks and escalations, used for status queries. |
+| Memory | ChromaDB. Every finished interaction is embedded and stored, and similar past interactions are fetched before routing. Results below a cosine similarity of 0.3 are dropped so unrelated memories don't leak into the context. |
+| Background work | `POST /tasks` stores the task, enqueues a Celery job and returns 202. A separate worker runs the graph and writes the result back. |
+| Model backends | `LLM_PROVIDER=local` (default, no API key), `openai` or `anthropic`. Nothing in `app/graph` changes between them. |
 
 ## Running it
 
-**Docker (production-shaped: real Postgres, Redis, Chroma server, and a separate worker process):**
-```bash
-docker compose up --build
-# API at http://localhost:8000/docs
-```
+Locally, without Postgres, Redis or a worker:
 
-**Locally, no Docker** (needs a Postgres reachable at `DATABASE_URL`, or set `CHECKPOINTER_BACKEND=sqlite` to skip Postgres entirely for local dev):
 ```bash
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload &
-celery -A app.celery_app worker --loglevel=info &     # skip if CELERY_TASK_ALWAYS_EAGER=true
+cp .env.example .env              # defaults to SQLite checkpoints and in-process Celery
+uvicorn app.main:app --reload     # API docs at http://localhost:8000/docs
 ```
 
-**End-to-end smoke test** (all four routes, both escalation outcomes, works whether Celery is eager or backed by a real worker):
+With Docker (Postgres, Redis, a Chroma server and a separate worker):
+
 ```bash
-python scripts/smoke_test.py --base-url http://localhost:8000
+docker compose up --build
 ```
 
-**Unit tests** (safe-math evaluator, routing heuristics, semantic memory + relevance threshold, ORM models — no live infrastructure needed):
+Tests:
+
 ```bash
-pytest tests/ -v
+pytest -q                                              # 45 tests, no services needed
+python scripts/smoke_test.py --base-url http://localhost:8000   # against a running stack
 ```
 
-To use real GPT-4o / Claude Sonnet, set `LLM_PROVIDER=openai` or `anthropic` and the matching API key in `.env`. To let the research agent actually query documents instead of returning "not configured", run the `rag-hybrid-search` project alongside this one and set `RAG_SERVICE_URL=http://localhost:8000` (its port, not this project's).
+The unit tests cover the calculator, routing rules, memory threshold, database models and the escalation claim. `tests/test_graph.py` compiles the real graph with an in-memory checkpointer and runs the math, escalation-approve and escalation-reject paths end to end. CI runs both suites, and the smoke job starts Postgres and Redis as services with the API and a Celery worker as separate processes.
+
+To use a real model, set `LLM_PROVIDER=openai` or `anthropic` and the matching key in `.env`. To make the research agent query documents, run rag-hybrid-search alongside this service and set `RAG_SERVICE_URL` to its address.
 
 ## API
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /tasks` | Submit `{"input": "..."}`; enqueues the graph run, returns `202` with the task immediately (`pending`/`completed`/`awaiting_human` depending on timing) |
-| `GET /tasks/{id}` | Poll task status: `pending` → `running` → `completed` \| `awaiting_human` \| `failed` |
-| `GET /tasks` | List recent tasks |
-| `GET /escalations?status=pending` | List escalations awaiting a human response |
-| `POST /escalations/{id}/respond` | Submit `{"response": "approve"}` (or `"reject"`, or free-text guidance) to resume the paused graph |
+| `POST /tasks` | Submit `{"input": "..."}`. Returns 202 with the task record. |
+| `GET /tasks/{id}` | Status: `pending`, `running`, `completed`, `awaiting_human` or `failed` |
+| `GET /tasks` | Most recent 50 tasks |
+| `GET /escalations?status=pending` | Escalations waiting for a reviewer |
+| `POST /escalations/{id}/respond` | `{"response": "approve"}`, `"reject"` or free text. Returns 409 if already resolved. |
 
-Full interactive schema at `/docs` once running.
+## Design decisions
 
-## Design notes / what a next iteration would add
+**Calculator limits.** Python integers have no size limit, so `9**9**9` never finishes, and the math agent turns "What is 2^9^9^9?" into exactly that. The evaluator rejects expressions over 200 characters, exponents over 1,000, and any integer result over 4,096 bits, and it checks the size of a power before computing it. Division by zero and float overflow come back as a message instead of failing the task.
 
-- **Escalation granularity**: the demo escalates at the *whole-request* level (the supervisor decides up front). The same `interrupt()`/`Command(resume=...)` pattern applies identically to a *single tool call* mid-agent (e.g., "approve this specific `send_email` call") — same primitive, finer placement.
-- **The offline `LocalRuleBasedProvider`'s routing is keyword-based**, not learned - it's a real, testable substitute for exercising the graph's control flow, not a claim about language understanding. One regression worth knowing about: an earlier, looser regex misrouted "90-minute" into the math agent (digit immediately followed by a hyphen); the fix requires a digit on *both* sides of an operator and is covered by a test (`test_hyphenated_compound_does_not_false_positive_to_math`).
-- **Semantic memory's relevance threshold** (`min_similarity=0.3`) is tuned for the offline hashing embedder, which has no learned semantics — recalibrate (likely upward) when `EMBEDDING_BACKEND=openai`, since real embeddings separate unrelated topics far more cleanly and the current threshold was chosen empirically against the crude baseline, not derived from first principles.
-- **Checkpointer connections are opened fresh per graph invocation** (one Celery task = one `with PostgresSaver.from_conn_string(...)` block) rather than pooled across the worker's lifetime - simple and correct for this task-per-job execution model; a very high-throughput deployment would want a shared connection pool instead.
-- Not included: auth/authz, retry/backoff policy for failed Celery tasks, a TTL/expiry sweep for escalations nobody ever responds to, structured tracing across the FastAPI → Celery → LangGraph boundary. All straightforward additions on top of the existing module boundaries.
+**Responding to an escalation exactly once.** The first version read the escalation, checked it was pending, then updated it. Two responses arriving together could both see "pending" and resume the graph twice. The claim is now a single `UPDATE ... WHERE status = 'pending'` and the handler checks that it changed one row (`app/db/escalations.py`). `tests/test_escalations.py` reproduces the stale-read case with two sessions.
 
-## A note on debugging this one
+**Escalation keywords.** The local provider escalates when a word starts with one of `ESCALATION_KEYWORDS`, so "deleted" and "payments" match but "undelete" doesn't. It still has no language understanding: "What does delete do in SQL?" is escalated.
 
-The Postgres-checkpointer + FastAPI + eager-Celery combination initially hung indefinitely on the very first request. Tracked down with `faulthandler.dump_traceback_later()` (dumps every thread's stack if the process is still alive after N seconds) to a specific line: the request handler was still holding its own DB session open (via FastAPI's `Depends`) while synchronously running the entire graph in-process. Fixed by closing the router's session before triggering task execution, plus forcing IPv4 and adding explicit connection timeouts so any future connection issue fails fast and loud instead of hanging silently. Verified fixed against both in-process (eager) execution and a genuinely separate Celery worker process.
+**Two stores for two jobs.** Task status needs exact queries and transactions, so it lives in Postgres. Memory recall is a similarity search, so it lives in Chroma. The LangGraph checkpointer is separate again: it holds one paused run's state so that run can resume.
+
+## Debugging notes
+
+With the Postgres checkpointer and eager Celery, the first request hung with no error. `faulthandler.dump_traceback_later()` dumped every thread's stack after a timeout and showed the request handler holding its own database session (from FastAPI's `Depends`) while it ran the whole graph inline. Closing the router's session before calling `.delay()` fixed it. I also forced IPv4 and added connection timeouts so connection problems fail fast instead of hanging.
+
+## Limitations
+
+- Escalation happens once per request, decided by the supervisor before any agent runs. The same `interrupt()` call could gate a single tool call instead (for example, approving one `send_email`).
+- The 0.3 memory threshold was tuned by trial against the hashing embedder, which has no learned semantics. It would need re-tuning for OpenAI embeddings.
+- Each graph run opens its own checkpointer connection. That's fine at this scale, but a busy deployment would want a shared pool.
+- Not included: authentication, retry policy for failed Celery jobs, expiry for escalations nobody answers, tracing across the API, Celery and LangGraph boundary.
